@@ -67,7 +67,7 @@
  * @brief host transfer max count.
  * transfer is the host driver resource for data transmission mission, one transmission mission need one transfer.
  */
-#define USB_HOST_CONFIG_MAX_TRANSFERS (16U)
+#define USB_HOST_CONFIG_MAX_TRANSFERS (32U)
 
 /*!
  * @brief the max endpoint for one interface.
@@ -115,7 +115,7 @@
 #endif
 
 /*! @brief if 1, class driver clear stall automatically; if 0, class driver don't clear stall. */
-#define USB_HOST_CONFIG_CLASS_AUTO_CLEAR_STALL (0U)
+#define USB_HOST_CONFIG_CLASS_AUTO_CLEAR_STALL (1U)
 
 /* KHCI configuration */
 #if ((defined USB_HOST_CONFIG_KHCI) && (USB_HOST_CONFIG_KHCI))
@@ -144,7 +144,7 @@
 /*!
  * @brief ehci QTD max count.
  */
-#define USB_HOST_CONFIG_EHCI_MAX_QTD (8U)
+#define USB_HOST_CONFIG_EHCI_MAX_QTD (32U)
 
 /*!
  * @brief ehci ITD max count.
