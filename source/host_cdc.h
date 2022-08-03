@@ -10,6 +10,11 @@
 #define __HOST_CDC_H__
 #define USB_HOST_CDC_UART_RX_MAX_LEN 1U
 
+#include "kfifo.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "event_groups.h"
+
 #define USB_HOST_CDC_SERIAL_CR '\r'
 #define USB_HOST_CDC_SERIAL_LF '\n'
 /*! @brief buffer for size for send and receive data */
@@ -50,6 +55,15 @@ typedef struct _cdc_instance_struct
     uint8_t runState;
     uint8_t runWaitState;
     uint8_t attachFlag;
+    struct  kfifo *recvFifo;
+    struct  kfifo *sendFifo;
+    uint8_t *recvFifoBuffer;
+    uint8_t *sendFifoBuffer;
+    uint8_t *recvUsbBuffer;
+    uint8_t *sendUsbBuffer;
+    uint8_t recvIdle;
+    EventGroupHandle_t xSendEventGroup;
+    uint8_t sendBusy;
 } cdc_instance_struct_t;
 
 /*! @brief USB host cdc instance global variable */
@@ -104,4 +118,7 @@ extern usb_status_t USB_HostCdcEvent(usb_device_handle deviceHandle,
                                      usb_host_configuration_handle configurationHandle,
                                      uint32_t event_code);
 
+extern uint32_t HOST_CdcVcomSend(cdc_instance_struct_t *cdcInstance, uint8_t *data, uint32_t size, uint32_t ms);
+
+extern uint32_t HOST_CdcVcomRecv(cdc_instance_struct_t *cdcInstance, uint8_t *data, uint32_t size);
 #endif /*__HOST_CDC_H__*/

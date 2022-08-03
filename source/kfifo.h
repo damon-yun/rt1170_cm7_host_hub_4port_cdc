@@ -40,6 +40,7 @@
 
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "event_groups.h"
 
 typedef struct kfifo {
     uint32_t  in;

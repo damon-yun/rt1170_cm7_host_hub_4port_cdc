@@ -14,10 +14,19 @@
 #include "fsl_component_serial_manager.h"
 #include "app.h"
 #include "board.h"
+
+#include "timers.h"
+#include "kfifo.h"
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
+#define USB_CDC_VCOM_PORT_NUM   (4)
+#define USB_CDC_VCOM_KFIFO_SIZE (2048)
 
+#define USB_CDC_VCOM_FRAME_SIZE (1024)
+
+#define CDC_VCOM_SEND_EVENT_SUCCESS   (1 << 0)
+#define CDC_VCOM_SEND_EVENT_FAIL      (1 << 1)
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
@@ -30,16 +39,24 @@ usb_host_class_handle cdcDataInterfaceHandle;
 /*the control  interface handle , this handle is init in the class init function*/
 usb_host_class_handle cdcControlIntfHandle;
 
-USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) cdc_instance_struct_t g_cdc_instance[4];
+USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) cdc_instance_struct_t g_cdc_instance[USB_CDC_VCOM_PORT_NUM];
 
 #if 0
 USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) usb_host_cdc_line_coding_struct_t g_LineCode;
 #endif
 
-USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currRecvBuf[1024];
-USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currSendBuf[1024];
+USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currRecvBuf[USB_CDC_VCOM_PORT_NUM][USB_CDC_VCOM_FRAME_SIZE];
+USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currSendBuf[USB_CDC_VCOM_PORT_NUM][USB_CDC_VCOM_FRAME_SIZE];
 
-extern uint8_t g_AttachFlag[4];
+static uint8_t s_RecvFifoBuf[USB_CDC_VCOM_PORT_NUM][USB_CDC_VCOM_KFIFO_SIZE];
+static uint8_t s_SendFifoBuf[USB_CDC_VCOM_PORT_NUM][USB_CDC_VCOM_KFIFO_SIZE];
+
+static struct kfifo recvKfifo[USB_CDC_VCOM_PORT_NUM];
+static struct kfifo sendKfifo[USB_CDC_VCOM_PORT_NUM];
+
+static TimerHandle_t xTimers[USB_CDC_VCOM_PORT_NUM];
+
+extern uint8_t g_AttachFlag[USB_CDC_VCOM_PORT_NUM];
 extern uint8_t g_VcomRecvFlag;
 /*******************************************************************************
  * Code
@@ -161,7 +178,78 @@ void USB_HostCdcControlCallback(void *param, uint8_t *data, uint32_t dataLength,
     }
 }
 
-volatile uint32_t cdc_count = 0;
+
+/*!
+ * @brief host cdc data transfer callback.
+ *
+ * This function is used as callback function for bulk in transfer .
+ *
+ * @param param    the host cdc instance pointer.
+ * @param data     data buffer pointer.
+ * @param dataLength data length.
+ * @status         transfer result status.
+ */
+static void HOST_CdcVcomDataInCallback(void *param, uint8_t *data, uint32_t dataLength, usb_status_t status)
+{
+    cdc_instance_struct_t *cdcInstance = (cdc_instance_struct_t *)param;
+
+    if (dataLength)
+    {
+        kfifo_in(cdcInstance->recvFifo, data, dataLength);
+        if (cdcInstance->bulkInMaxPacketSize == dataLength) {
+            USB_HostCdcDataRecv(cdcInstance->classHandle, NULL, 0, HOST_CdcVcomDataInCallback, cdcInstance);
+        } else {
+            USB_HostCdcDataRecv(cdcInstance->classHandle, data, USB_CDC_VCOM_FRAME_SIZE, HOST_CdcVcomDataInCallback, cdcInstance);        
+        }
+
+    } else {
+        cdcInstance->recvIdle = 1;
+    }
+}
+
+
+/*!
+ * @brief host cdc data transfer callback.
+ *
+ * This function is used as callback function for bulk out transfer .
+ *
+ * @param param    the host cdc instance pointer.
+ * @param data     data buffer pointer.
+ * @param dataLength data length.
+ * @status         transfer result status.
+ */
+static void HOST_CdcVcomDataOutCallback(void *param, uint8_t *data, uint32_t dataLength, usb_status_t status)
+{
+    cdc_instance_struct_t *cdcInstance = (cdc_instance_struct_t *)param;
+
+    if (status == kStatus_USB_Success) {
+        xEventGroupSetBits(cdcInstance->xSendEventGroup, CDC_VCOM_SEND_EVENT_SUCCESS);
+    } else {
+        xEventGroupSetBits(cdcInstance->xSendEventGroup, CDC_VCOM_SEND_EVENT_FAIL);
+    }
+    
+    cdcInstance->sendBusy = 0;
+}
+
+
+
+static void vCdcRecvTimerCallback( TimerHandle_t xTimer )
+{
+    const uint32_t ulMaxExpiryCountBeforeStopping = 10;
+    cdc_instance_struct_t *cdcInstance = 0;
+    uint32_t ulCount;
+
+    /* Optionally do something if the pxTimer parameter is NULL. */
+    configASSERT( xTimer );
+
+    cdcInstance = (cdc_instance_struct_t *)pvTimerGetTimerID( xTimer );
+
+    if (cdcInstance->recvIdle == 1) {
+        cdcInstance->recvIdle = 0;
+        USB_HostCdcDataRecv(cdcInstance->classHandle, cdcInstance->recvUsbBuffer, 512, HOST_CdcVcomDataInCallback, cdcInstance);
+    }
+
+}
 /*!
  * @brief host cdc task function.
  *
@@ -196,7 +284,18 @@ void USB_HostCdcTask(void *param)
                 break;
             case kStatus_DEV_Attached:
                 cdcInstance->runState = kUSB_HostCdcRunSetControlInterface;
-                status                = USB_HostCdcInit(cdcInstance->deviceHandle, &cdcInstance->classHandle);
+
+                cdcInstance->recvUsbBuffer  = &(s_currRecvBuf[port_num][0]);
+                cdcInstance->recvFifoBuffer = &(s_RecvFifoBuf[port_num][0]);
+                cdcInstance->sendUsbBuffer  = &(s_currRecvBuf[port_num][0]);                
+                cdcInstance->sendFifoBuffer = &(s_SendFifoBuf[port_num][0]);
+                cdcInstance->recvFifo       = &(recvKfifo[port_num]);
+                cdcInstance->sendFifo       = &(sendKfifo[port_num]);
+
+                xTimers[port_num] = xTimerCreate("Recv Timer", 100, pdTRUE, ( void * ) &g_cdc_instance[port_num], vCdcRecvTimerCallback);
+                cdcInstance->xSendEventGroup = xEventGroupCreate();
+
+                status  = USB_HostCdcInit(cdcInstance->deviceHandle, &cdcInstance->classHandle);
                 usb_echo("cdc device attached\r\n");
                 break;
             case kStatus_DEV_Detached:
@@ -207,6 +306,8 @@ void USB_HostCdcTask(void *param)
                 cdcInstance->classHandle            = NULL;
                 cdcInstance->controlInterfaceHandle = NULL;
                 cdcInstance->deviceHandle           = NULL;
+                xTimerDelete(xTimers[port_num], portMAX_DELAY);
+            
                 usb_echo("cdc device detached\r\n");
                 break;
             default:
@@ -279,6 +380,20 @@ void USB_HostCdcTask(void *param)
         case kUSB_HostCdcRunGetLineCodeDone:
             cdcInstance->runState = kUSB_HostCdcRunIdle;
             cdcInstance->attachFlag = 1;
+
+            kfifo_init(cdcInstance->recvFifo, cdcInstance->recvFifoBuffer, USB_CDC_VCOM_KFIFO_SIZE);
+            kfifo_init(cdcInstance->sendFifo, cdcInstance->sendFifoBuffer, USB_CDC_VCOM_KFIFO_SIZE);
+            cdcInstance->recvIdle = 0;
+            USB_HostCdcDataRecv(cdcInstance->classHandle, cdcInstance->recvUsbBuffer, USB_CDC_VCOM_FRAME_SIZE, HOST_CdcVcomDataInCallback, cdcInstance);
+
+            /* Start the timer.  No block time is specified, and
+            even if one was it would be ignored because the RTOS
+            scheduler has not yet been started. */
+            if( xTimerStart( xTimers[port_num], 0 ) != pdPASS )
+            {
+                usb_echo("port %d Timer Start fail \r\n", port_num);
+            }
+            usb_echo("port %d attached\r\n", port_num);
             break;
         default:
             break;
@@ -417,3 +532,65 @@ usb_status_t USB_HostCdcEvent(usb_device_handle deviceHandle,
     }
     return status;
 }
+
+uint32_t HOST_CdcVcomSend(cdc_instance_struct_t *cdcInstance, uint8_t *data, uint32_t size, uint32_t ms)
+{
+    EventBits_t uxBits;
+    const TickType_t xTicksToWait = ms * portTICK_PERIOD_MS;
+    
+    if (cdcInstance == NULL || data == NULL) {
+        return 0;
+    }
+    
+    if (size > USB_CDC_VCOM_FRAME_SIZE) {
+        size = USB_CDC_VCOM_FRAME_SIZE;
+    }
+    
+    if (cdcInstance->sendBusy == 1) {
+        uxBits = xEventGroupWaitBits(cdcInstance->xSendEventGroup, CDC_VCOM_SEND_EVENT_SUCCESS | CDC_VCOM_SEND_EVENT_FAIL,  pdTRUE, pdFALSE, xTicksToWait );
+        
+        if(!(uxBits & ( CDC_VCOM_SEND_EVENT_SUCCESS | CDC_VCOM_SEND_EVENT_FAIL ))  )
+        {
+            return 0;
+        }
+    }
+    
+    memcpy(cdcInstance->sendUsbBuffer, data, size);
+    
+    cdcInstance->sendBusy = 1;
+    
+    USB_HostCdcDataSend(cdcInstance->classHandle, cdcInstance->sendUsbBuffer, size, HOST_CdcVcomDataOutCallback, cdcInstance);
+
+    /* Wait a maximum of 100ms for either bit 0 or bit 4 to be set within
+    the event group.  Clear the bits before exiting. */
+    uxBits = xEventGroupWaitBits(cdcInstance->xSendEventGroup, CDC_VCOM_SEND_EVENT_SUCCESS | CDC_VCOM_SEND_EVENT_FAIL,  pdTRUE, pdFALSE, xTicksToWait );
+    if( ( uxBits & ( CDC_VCOM_SEND_EVENT_SUCCESS | CDC_VCOM_SEND_EVENT_FAIL ) ) == ( CDC_VCOM_SEND_EVENT_SUCCESS | CDC_VCOM_SEND_EVENT_FAIL ) )
+    {
+        return 0;
+    }
+    else if( ( uxBits & CDC_VCOM_SEND_EVENT_SUCCESS ) != 0 )
+    {
+        return size;
+    }
+    else
+    {
+        return 0;
+    }
+    return 0;
+}
+
+uint32_t HOST_CdcVcomRecv(cdc_instance_struct_t *cdcInstance, uint8_t *data, uint32_t size)
+{
+    uint32_t n = 0;
+    
+    if (cdcInstance == NULL || data == NULL) {
+        return 0;
+    }
+    
+    if (kfifo_initialized(cdcInstance->recvFifo)) {
+        n = kfifo_out(cdcInstance->recvFifo, data, size);
+    }
+    
+    return n;
+}
+

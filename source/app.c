@@ -50,11 +50,6 @@ USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) uint8_t ucHeap[configTOTAL_HEAP_
 
 usb_host_handle g_hostHandle;
 
-
-static uint8_t recvFifoBuffer[4][USB_CDC_VCOM_KFIFO_SIZE];
-static uint8_t sendFifoBuffer[4][USB_CDC_VCOM_KFIFO_SIZE];
-kfifo_t cdcRecvkfifo;
-kfifo_t cdcSendkfifo;
 /*******************************************************************************
  * Code
  ******************************************************************************/
@@ -200,66 +195,7 @@ void usb_host_task(void *hostHandle)
     }
 }
 
-USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currRecvBuf[1024];
-USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) static uint8_t s_currSendBuf[1024];
-SemaphoreHandle_t xSemaphore_cdcrecv;
-SemaphoreHandle_t xSemaphore_cdcsend;
-uint32_t cdc_vcom_recv_idle = 0;
-TimerHandle_t xTimer;
-/*!
- * @brief host cdc data transfer callback.
- *
- * This function is used as callback function for bulk in transfer .
- *
- * @param param    the host cdc instance pointer.
- * @param data     data buffer pointer.
- * @param dataLength data length.
- * @status         transfer result status.
- */
-static void HOST_CdcVcomDataInCallback(void *param, uint8_t *data, uint32_t dataLength, usb_status_t status)
-{
-    cdc_instance_struct_t *cdcInstance = (cdc_instance_struct_t *)param;
-#if 0
-    if (dataLength)
-    {
-        usb_echo("%s", s_currRecvBuf);
-    }
-    if (cdcInstance->bulkInMaxPacketSize == dataLength)
-    {
-        /* host will prime to receive zero length packet after recvive one maxpacketsize */
-        USB_HostCdcDataRecv(cdcInstance->classHandle, NULL, 0, HOST_CdcVcomDataInCallback, cdcInstance);
-    } else {
-        /* Producer is ready to provide item. */
-        xSemaphoreGive(xSemaphore_cdcrecv);
-    }
-#else
-    if (dataLength)
-    {
-        kfifo_in(&cdcRecvkfifo, data, dataLength);
-        cdc_vcom_recv_idle = 0;
-        USB_HostCdcDataRecv(cdcInstance->classHandle, data, 512, HOST_CdcVcomDataInCallback, cdcInstance);
-    } else {
-        cdc_vcom_recv_idle = 1;
-    }
-#endif
-}
-
-/*!
- * @brief host cdc data transfer callback.
- *
- * This function is used as callback function for bulk out transfer .
- *
- * @param param    the host cdc instance pointer.
- * @param data     data buffer pointer.
- * @param dataLength data length.
- * @status         transfer result status.
- */
-void HOST_CdcVcomDataOutCallback(void *param, uint8_t *data, uint32_t dataLength, usb_status_t status)
-{
-    cdc_instance_struct_t *cdcInstance = (cdc_instance_struct_t *)param;
-
-
-}
+extern int DbgConsole_SendDataReliable(uint8_t *ch, size_t size);
 
 void HOST_CDCRecvTask(void *param)
 {
@@ -267,35 +203,17 @@ void HOST_CDCRecvTask(void *param)
     uint8_t buffer[512];
     uint32_t n = 0;
     
-    /* Attempt to create a semaphore. */
-    xSemaphore_cdcrecv = xSemaphoreCreateBinary();
-
-    if( xSemaphore_cdcrecv == NULL )
-    {
-        while(1)
-            vTaskDelay(5);
-    }
-    while(1) {
-        if (cdcInstance->attachFlag == 1) {
-            if (USB_HostCdcDataRecv(cdcInstance->classHandle, (uint8_t *)&s_currRecvBuf[0], 512, HOST_CdcVcomDataInCallback, cdcInstance) != kStatus_USB_Success){
-
-                vTaskDelay(5);
-            }
-            break;
-        } else {
-            vTaskDelay(5);
-        }
-    }
     while(1) {
         if (cdcInstance->attachFlag == 1) {
 
             memset(buffer, 0, sizeof(buffer));
-            n = kfifo_out(&cdcRecvkfifo, buffer, sizeof(buffer));
+//            n = kfifo_out(cdcInstance->recvFifo, buffer, sizeof(buffer));
+            n = HOST_CdcVcomRecv(cdcInstance, buffer, sizeof(buffer));
 
             if (n) {
-                usb_echo("%s", buffer);
+                DbgConsole_SendDataReliable(buffer, n);
             } else {
-                taskYIELD();
+                vTaskDelay(10);
             }
 
         } else {
@@ -303,9 +221,38 @@ void HOST_CDCRecvTask(void *param)
         }
     }
 }
+#define HOST_TASK_SEND_SIZE (32)
 
+void HOST_CDCSendTask(void *param)
+{
+    cdc_instance_struct_t *cdcInstance = (cdc_instance_struct_t *)param;
+    uint8_t buffer[512];
+    
+    for (int i = 0; i < HOST_TASK_SEND_SIZE; i++) {
+        buffer[i] = '0' + i;
+    }
+    buffer[HOST_TASK_SEND_SIZE - 2] = '\r';
+    buffer[HOST_TASK_SEND_SIZE - 1] = '\n';
+    
+    while(1) {
+        if (cdcInstance->attachFlag == 1) {
+
+            HOST_CdcVcomSend(cdcInstance, buffer, HOST_TASK_SEND_SIZE, portMAX_DELAY);
+            vTaskDelay(500);
+
+        } else {
+            vTaskDelay(5);
+        }
+    }
+}
 void host_cdc_enum_task(void *param)
 {
+    /* Reset GNSS Board */
+    GPIO_WritePinOutput(GPIO5, 11, 0);
+    vTaskDelay(500);
+    GPIO_WritePinOutput(GPIO5, 11, 1);
+    vTaskDelay(500);
+    
     while (1)
     {
         USB_HostCdcTask(&g_cdc_instance[0]);
@@ -313,24 +260,6 @@ void host_cdc_enum_task(void *param)
         USB_HostCdcTask(&g_cdc_instance[2]);
         USB_HostCdcTask(&g_cdc_instance[3]);
     }
-}
-
-void vTimerCallback( TimerHandle_t xTimer )
-{
-    const uint32_t ulMaxExpiryCountBeforeStopping = 10;
-    uint32_t ulCount;
-
-    /* Optionally do something if the pxTimer parameter is NULL. */
-    configASSERT( xTimer );
-
-    /* The number of times this timer has expired is saved as the
-    timer's ID.  Obtain the count. */
-    ulCount = ( uint32_t ) pvTimerGetTimerID( xTimer );
-
-    if (cdc_vcom_recv_idle == 1) {
-        USB_HostCdcDataRecv(g_cdc_instance[1].classHandle, (uint8_t *)&s_currRecvBuf[0], 512, HOST_CdcVcomDataInCallback, &g_cdc_instance[1]);
-    }
-
 }
 
 int main(void)
@@ -343,35 +272,36 @@ int main(void)
     
     HOST_UsbInit();
 
-    kfifo_init(&cdcRecvkfifo, &(recvFifoBuffer[0][0]), USB_CDC_VCOM_KFIFO_SIZE);
-    
-    xTimer = xTimerCreate("Recv Timer", 100, pdTRUE, ( void * ) 0, vTimerCallback);
 
-    /* Start the timer.  No block time is specified, and
-    even if one was it would be ignored because the RTOS
-    scheduler has not yet been started. */
-    if( xTimerStart( xTimer, 0 ) != pdPASS )
-    {
-        /* The timer could not be set into the Active
-        state. */
-    }
-
-    if (xTaskCreate(usb_host_task, "usb host task", 2000L / sizeof(portSTACK_TYPE), g_hostHandle, 8, NULL) != pdPASS)
+    if (xTaskCreate(usb_host_task, "usb host task", 2048L / sizeof(portSTACK_TYPE), g_hostHandle, 4, NULL) != pdPASS)
     {
         usb_echo("create host task error\r\n");
     }
     
-    if (xTaskCreate(host_cdc_enum_task, "host cdc enum task", 2000L / sizeof(portSTACK_TYPE), NULL, 3, NULL) != pdPASS)
+    if (xTaskCreate(host_cdc_enum_task, "host cdc enum task", 2048L / sizeof(portSTACK_TYPE), NULL, 2, NULL) != pdPASS)
     {
         usb_echo("create cdc task error\r\n");
-    }    
+    }
+    
+    if (xTaskCreate(HOST_CDCRecvTask, "host cdc recv task", 2048L / sizeof(portSTACK_TYPE), &g_cdc_instance[0], 5, NULL) != pdPASS)
+    {
+        usb_echo("create host cdc recv task error\r\n");
+    }
     
     if (xTaskCreate(HOST_CDCRecvTask, "host cdc recv task", 2048L / sizeof(portSTACK_TYPE), &g_cdc_instance[1], 5, NULL) != pdPASS)
     {
         usb_echo("create host cdc recv task error\r\n");
     }
     
-
+    if (xTaskCreate(HOST_CDCRecvTask, "host cdc recv task", 2048L / sizeof(portSTACK_TYPE), &g_cdc_instance[2], 5, NULL) != pdPASS)
+    {
+        usb_echo("create host cdc recv task error\r\n");
+    }
+    
+    if (xTaskCreate(HOST_CDCSendTask, "host cdc send task", 2048L / sizeof(portSTACK_TYPE), &g_cdc_instance[2], 5, NULL) != pdPASS)
+    {
+        usb_echo("create host cdc recv task error\r\n");
+    }    
     
     vTaskStartScheduler();
     while (1)

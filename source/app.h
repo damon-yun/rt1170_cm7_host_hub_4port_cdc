@@ -24,7 +24,7 @@
 #endif /* USB_HOST_CONFIG_KHCI */
 #if ((defined USB_HOST_CONFIG_EHCI) && (USB_HOST_CONFIG_EHCI))
 #ifndef CONTROLLER_ID
-#define CONTROLLER_ID kUSB_ControllerEhci0
+#define CONTROLLER_ID kUSB_ControllerEhci1
 #endif
 #endif /* USB_HOST_CONFIG_EHCI */
 #if ((defined USB_HOST_CONFIG_OHCI) && (USB_HOST_CONFIG_OHCI))
