@@ -184,7 +184,6 @@ void HOST_UsbInit(void)
         "if the device does't support it, please set USB_HOST_UART_SUPPORT_HW_FLOW to zero and rebuild this "
         "project\r\n");
     usb_echo("Type strings, then the string\r\n");
-    usb_echo("will be echoed back from the device\r\n");
 }
 
 void usb_host_task(void *hostHandle)
@@ -204,20 +203,14 @@ void HOST_CDCRecvTask(void *param)
     uint32_t n = 0;
     
     while(1) {
-        if (cdcInstance->attachFlag == 1) {
 
-            memset(buffer, 0, sizeof(buffer));
-//            n = kfifo_out(cdcInstance->recvFifo, buffer, sizeof(buffer));
-            n = HOST_CdcVcomRecv(cdcInstance, buffer, sizeof(buffer));
+        memset(buffer, 0, sizeof(buffer));
+        n = HOST_CdcVcomRecv(cdcInstance, buffer, sizeof(buffer));
 
-            if (n) {
-                DbgConsole_SendDataReliable(buffer, n);
-            } else {
-                vTaskDelay(10);
-            }
-
+        if (n) {
+            DbgConsole_SendDataReliable(buffer, n);
         } else {
-            vTaskDelay(5);
+            vTaskDelay(10);
         }
     }
 }
@@ -235,14 +228,8 @@ void HOST_CDCSendTask(void *param)
     buffer[HOST_TASK_SEND_SIZE - 1] = '\n';
     
     while(1) {
-        if (cdcInstance->attachFlag == 1) {
-
-            HOST_CdcVcomSend(cdcInstance, buffer, HOST_TASK_SEND_SIZE, portMAX_DELAY);
-            vTaskDelay(500);
-
-        } else {
-            vTaskDelay(5);
-        }
+        HOST_CdcVcomSend(cdcInstance, buffer, HOST_TASK_SEND_SIZE, portMAX_DELAY);
+        vTaskDelay(500);
     }
 }
 void host_cdc_enum_task(void *param)
@@ -272,6 +259,7 @@ int main(void)
     
     HOST_UsbInit();
 
+    memset(g_cdc_instance, 0, sizeof(g_cdc_instance));
 
     if (xTaskCreate(usb_host_task, "usb host task", 2048L / sizeof(portSTACK_TYPE), g_hostHandle, 4, NULL) != pdPASS)
     {

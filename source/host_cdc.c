@@ -541,7 +541,9 @@ uint32_t HOST_CdcVcomSend(cdc_instance_struct_t *cdcInstance, uint8_t *data, uin
     if (cdcInstance == NULL || data == NULL) {
         return 0;
     }
-    
+    if (cdcInstance->attachFlag == 0) {
+        return 0;
+    }
     if (size > USB_CDC_VCOM_FRAME_SIZE) {
         size = USB_CDC_VCOM_FRAME_SIZE;
     }
@@ -586,7 +588,9 @@ uint32_t HOST_CdcVcomRecv(cdc_instance_struct_t *cdcInstance, uint8_t *data, uin
     if (cdcInstance == NULL || data == NULL) {
         return 0;
     }
-    
+    if (cdcInstance->attachFlag == 0) {
+        return 0;
+    }
     if (kfifo_initialized(cdcInstance->recvFifo)) {
         n = kfifo_out(cdcInstance->recvFifo, data, size);
     }
